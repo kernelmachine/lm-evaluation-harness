@@ -2,13 +2,19 @@ import torch
 import transformers
 from typing import Optional
 from lm_eval.base import BaseLM
+from open_lm.model import  _MODEL_CONFIGS, Transformer, ModelArgs
+from training.file_utils import pt_load
+from tiktoken import get_encoding
+from training.generation import Generator
+from copy import deepcopy
+from transformers import GPTNeoXForCausalLM, GPTNeoXTokenizerFast
 
-
-class HFLM(BaseLM):
+class OpenLMNeoX(BaseLM):
     def __init__(
         self,
+        path_to_checkpoint,
         device="cuda",
-        pretrained="gpt2",
+        pretrained_model="gpt2",
         revision="main",
         low_cpu_mem_usage=None,
         subfolder=None,
@@ -20,12 +26,10 @@ class HFLM(BaseLM):
         super().__init__()
 
         assert isinstance(device, str)
-        assert isinstance(pretrained, str)
-        assert isinstance(batch_size, (int, str))
+        assert isinstance(pretrained_model, str)
+        assert isinstance(batch_size, (int,str))
 
-        device_list = set(
-            ["cuda", "cpu"] + [f"cuda:{i}" for i in range(torch.cuda.device_count())]
-        )
+        device_list = set(["cuda", "cpu"] + [f'cuda:{i}' for i in range(torch.cuda.device_count())])
         if device and device in device_list:
             self._device = torch.device(device)
             print(f"Using device '{device}'")
@@ -41,51 +45,49 @@ class HFLM(BaseLM):
         # TODO: update this to be less of a hack once subfolder is fixed in HF
         revision = revision + ("/" + subfolder if subfolder is not None else "")
 
-        self.gpt2 = transformers.AutoModelForCausalLM.from_pretrained(
-            pretrained,
-            load_in_8bit=load_in_8bit,
-            low_cpu_mem_usage=low_cpu_mem_usage,
-            revision=revision,
-            trust_remote_code=trust_remote_code,
-        ).to(self.device)
+        cfg =  deepcopy(_MODEL_CONFIGS[pretrained_model])
+
+        model_args = ModelArgs(
+            dim=cfg['hidden_dim'],
+            n_layers=cfg['n_layers'],
+            n_heads=cfg['n_heads'],
+            seq_len=cfg['seq_len'],
+            vocab_size=cfg['vocab_size'],
+            pre_ln=cfg['pre_ln'],
+            pos_embed_type=cfg['pos_embed_type'],
+            weight_tying=cfg['weight_tying'],
+            attn_type=cfg['attn_type'],
+        )
+        model = Transformer(model_args)
+
+        
+        self.gpt2 = model.to(self.device)
+        checkpoint = pt_load(path_to_checkpoint, map_location='cpu')
+        sd = checkpoint['state_dict']
+        #sd = {k[len('module.'):]: v for k, v in sd.items()}
+        
+        self.gpt2.load_state_dict(sd)
         self.gpt2.eval()
 
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-            pretrained if tokenizer is None else tokenizer,
-            revision=revision,
-            trust_remote_code=trust_remote_code,
-        )
+        self.tokenizer = GPTNeoXTokenizerFast.from_pretrained("EleutherAI/gpt-neox-20b")
 
-        self.vocab_size = self.tokenizer.vocab_size
-
-        if isinstance(
-            self.tokenizer, (transformers.GPT2Tokenizer, transformers.GPT2TokenizerFast)
-        ):
-            assert self.tokenizer.encode("hello\n\nhello") == [
-                31373,
-                198,
-                198,
-                31373,
-            ], self.tokenizer.encode("hello\n\nhello")
+        self.vocab_size = 50432
+        self.generator = Generator(model)
 
         # setup for automatic batch size detection
-        if batch_size == "auto":
+        if batch_size == 'auto': 
             self.batch_size_per_gpu = batch_size
         else:
-            self.batch_size_per_gpu = int(batch_size)
+            self.batch_size_per_gpu = int(batch_size) 
 
     @property
     def eot_token_id(self):
         # we use EOT because end of *text* is more accurate for what we're doing than end of *sentence*
-        return self.tokenizer.eos_token_id
+        return 0
 
     @property
     def max_length(self):
-        try:
-            return self.gpt2.config.n_ctx
-        except AttributeError:
-            # gptneoconfig doesn't have n_ctx apparently
-            return 2048
+        return 2048
 
     @property
     def max_gen_toks(self):
@@ -102,7 +104,7 @@ class HFLM(BaseLM):
         return self._device
 
     def tok_encode(self, string: str):
-        return self.tokenizer.encode(string, add_special_tokens=False)
+        return self.tokenizer.encode(string)
 
     def tok_decode(self, tokens):
         return self.tokenizer.decode(tokens)
@@ -116,15 +118,9 @@ class HFLM(BaseLM):
         logits returned from the model
         """
         with torch.no_grad():
-            return self.gpt2(inps)[0]
+            return self.gpt2(inps)
 
     def _model_generate(self, context, max_length, eos_token_id):
-        generation_kwargs = {"do_sample": False, "max_length": max_length}
-        if eos_token_id is not None:
-            generation_kwargs['eos_token_id'] = eos_token_id
-            generation_kwargs['pad_token_id'] = eos_token_id # setting eos_token_id as pad token
-        return self.gpt2.generate(context, **generation_kwargs)
+        generation_kwargs = {'temperature': 0.0, 'max_gen_len': max_length}
+        return self.generator.generate(context)
 
-
-# for backwards compatibility
-GPT2LM = HFLM

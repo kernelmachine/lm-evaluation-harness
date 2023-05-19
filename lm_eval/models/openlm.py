@@ -8,6 +8,12 @@ from tiktoken import get_encoding
 from training.generation import Generator
 from copy import deepcopy
 
+def modify_tokens(tokens):
+    for token in tokens:
+        if token in [50281, 50282]:
+            yield 50256
+        else:
+            yield token
 
 class OpenLM(BaseLM):
     def __init__(
@@ -64,13 +70,14 @@ class OpenLM(BaseLM):
         self.gpt2 = model.to(self.device)
         checkpoint = pt_load(path_to_checkpoint, map_location='cpu')
         sd = checkpoint['state_dict']
-        sd = {k[len('module.'):]: v for k, v in sd.items()}
+        #sd = {k[len('module.'):]: v for k, v in sd.items()}
+        
         self.gpt2.load_state_dict(sd)
         self.gpt2.eval()
 
         self.tokenizer = get_encoding("p50k_base")
 
-        self.vocab_size = self.tokenizer.max_token_value
+        self.vocab_size = 50304
         self.generator = Generator(model)
 
         # setup for automatic batch size detection
@@ -106,6 +113,7 @@ class OpenLM(BaseLM):
         return self.tokenizer.encode(string)
 
     def tok_decode(self, tokens):
+        tokens = modify_tokens(tokens)
         return self.tokenizer.decode(tokens)
 
     def _model_call(self, inps):

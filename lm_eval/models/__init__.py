@@ -3,6 +3,8 @@ from . import gpt3
 from . import huggingface
 from . import textsynth
 from . import dummy
+from . import openlm
+from . import openlm_neox
 
 MODEL_REGISTRY = {
     "hf": gpt2.HFLM,
@@ -13,6 +15,8 @@ MODEL_REGISTRY = {
     "gpt3": gpt3.GPT3LM,
     "textsynth": textsynth.TextSynthLM,
     "dummy": dummy.DummyLM,
+    "openlm": openlm.OpenLM,
+    "openlm_neox": openlm_neox.OpenLMNeoX,
 }
 
 
